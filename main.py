@@ -73,6 +73,7 @@ def run_fl_training(args):
             epsilon=args.epsilon,
             learning_rate=args.lr_dp,
             local_epochs=args.local_epochs,
+            total_rounds=args.rounds,
             device=device,
         )
         for i, loader in enumerate(client_loaders)

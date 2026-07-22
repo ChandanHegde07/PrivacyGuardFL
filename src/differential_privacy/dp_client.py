@@ -1,13 +1,19 @@
 import copy
+import math
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+from opacus.accountants.analysis.rdp import (
+    compute_rdp,
+    get_privacy_spent,
+)
+from opacus.accountants.utils import get_noise_multiplier
 
 
 class DPClient:
@@ -22,6 +28,7 @@ class DPClient:
         noise_multiplier: Optional[float] = None,
         learning_rate: float = 0.05,
         local_epochs: int = 3,
+        total_rounds: int = 1,
         device: torch.device = None,
     ):
         self.client_id = client_id
@@ -32,45 +39,48 @@ class DPClient:
         self.clip_norm = clip_norm
         self.learning_rate = learning_rate
         self.local_epochs = local_epochs
+        self.total_rounds = total_rounds
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
-        self._privacy_spent = 0.0
         self.num_train = len(train_loader.dataset)
+        self.batch_size = train_loader.batch_size
+        self.sample_rate = self.batch_size / self.num_train
 
         if noise_multiplier is None:
             self.noise_multiplier = self._compute_noise_multiplier()
         else:
             self.noise_multiplier = noise_multiplier
 
+        self._composed_rdp = {}
+        self._rdp_orders = []
+        self._steps_taken = 0
+
     def _compute_noise_multiplier(self) -> float:
-        q = 1.0 / self.num_train
-        steps = self.local_epochs * max(1, len(self.train_loader))
-        sigma_min = 0.1
-        sigma_max = 50.0
-
-        for _ in range(50):
-            sigma = (sigma_min + sigma_max) / 2
-            eps = (
-                q
-                * self.epsilon
-                / sigma
-                * np.sqrt(steps * np.log(1.0 / self.delta))
-            )  # approximate RDP
-            if eps > self.epsilon:
-                sigma_min = sigma
-            else:
-                sigma_max = sigma
-
-        return sigma_max
-
-    def _estimate_privacy_spent(self, steps: int):
-        q = 1.0 / self.num_train
-        self._privacy_spent += (
-            q
-            * self.noise_multiplier
-            * np.sqrt(steps * np.log(1.0 / self.delta))
+        return get_noise_multiplier(
+            target_epsilon=self.epsilon,
+            target_delta=self.delta,
+            sample_rate=self.sample_rate,
+            epochs=self.local_epochs * self.total_rounds,
+            accountant="rdp",
         )
+
+    def _record_step(self):
+        orders = [1 + x / 10.0 for x in range(1, 100)] + list(range(12, 64))
+
+        eps_per_order = compute_rdp(
+            q=self.sample_rate,
+            noise_multiplier=self.noise_multiplier,
+            steps=1,
+            orders=orders,
+        )
+
+        for i, order in enumerate(orders):
+            self._composed_rdp.setdefault(order, 0.0)
+            self._composed_rdp[order] += eps_per_order[i]
+
+        self._rdp_orders = orders
+        self._steps_taken += 1
 
     def _clip_gradients(self, parameters, clip_norm: float):
         total_norm = 0.0
@@ -117,9 +127,9 @@ class DPClient:
                         if p.grad is not None:
                             p.data -= self.learning_rate * p.grad
 
+                self._record_step()
                 steps += 1
 
-        self._estimate_privacy_spent(steps)
         return self.get_weights()
 
     def get_weights(self) -> Dict[str, np.ndarray]:
@@ -133,7 +143,14 @@ class DPClient:
 
     @property
     def privacy_spent(self) -> float:
-        return self._privacy_spent
+        if not self._composed_rdp:
+            return 0.0
+        eps, best_alpha = get_privacy_spent(
+            orders=self._rdp_orders,
+            rdp=list(self._composed_rdp.values()),
+            delta=self.delta,
+        )
+        return eps
 
 
 class DPFedServer:
@@ -155,10 +172,16 @@ class DPFedServer:
         self.server_noise_std = server_noise_std
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.global_model.to(self.device)
+
+        for client in self.clients:
+            client.total_rounds = self.rounds
+            client.noise_multiplier = client._compute_noise_multiplier()
+
         self.history: Dict[str, List[float]] = {
             "test_accuracy": [],
             "test_loss": [],
             "privacy_spent": [],
+            "noise_multiplier": [],
         }
 
     def _get_global_weights(self) -> Dict[str, np.ndarray]:
@@ -217,10 +240,12 @@ class DPFedServer:
 
             accuracy, loss = self._evaluate()
             max_eps = max(c.privacy_spent for c in self.clients)
+            sigma = selected[0].noise_multiplier
 
             self.history["test_accuracy"].append(accuracy)
             self.history["test_loss"].append(loss)
             self.history["privacy_spent"].append(max_eps)
+            self.history["noise_multiplier"].append(sigma)
 
             if progress_callback:
                 progress_callback(rnd, accuracy, loss, max_eps)
