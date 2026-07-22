@@ -96,8 +96,9 @@ def run_fl_training(args):
 
 
 def run_attack_demo(args):
-    print("\n[Attack Demo] Gradient Inversion Attack")
-    print("  Capturing a single-batch gradient from Client 0 and attempting to reconstruct the input image...")
+    print("\n[Attack Demo] Gradient Inversion Attack (iDLG + Adam)")
+    print("  Capturing a single-sample gradient from client 0's fresh model")
+    print("  and reconstructing the private image via iDLG.\n")
 
     device = get_device()
     pipe = DataPipe(
@@ -108,42 +109,81 @@ def run_attack_demo(args):
     )
     client_loaders, _, _ = pipe.build_client_loaders()
 
-    model = MNISTModel().to(device)
     data, target = next(iter(client_loaders[0]))
     data, target = data.to(device), target.to(device)
 
+    model = MNISTModel().to(device)
     criterion = torch.nn.CrossEntropyLoss()
+
+    # --- Unprotected gradient ---
     model.zero_grad()
     output = model(data)
     loss = criterion(output, target)
     loss.backward()
-
     original_weights = {n: p.cpu().numpy().copy() for n, p in model.state_dict().items()}
-    captured_grad = {n: p.grad.cpu().numpy().copy() for n, p in model.named_parameters() if p.grad is not None}
+    unprotected_grad = {n: p.grad.cpu().numpy().copy() for n, p in model.named_parameters() if p.grad is not None}
 
-    attack = GradientInversionAttack(model, original_weights, captured_grad, device=device)
+    # --- DP-protected gradient (same input, same weights, through DP pipeline) ---
+    dp_client = DPClient(
+        0, MNISTModel(), client_loaders[0],
+        epsilon=args.epsilon,
+        local_epochs=1,
+        total_rounds=1,
+        device=device,
+    )
+    dp_client.model.load_state_dict({n: torch.from_numpy(v).to(device) for n, v in original_weights.items()})
+    dp_grad = dp_client.compute_dp_gradient(data, target)
 
-    print(f"  Running DLG attack ({args.attack_steps} steps, lr={args.attack_lr})...")
-    recon, label_recon, history = attack.attack(
+    print(f"  DP params: σ={dp_client.noise_multiplier:.4f}  C={dp_client.clip_norm}  "
+          f"q={dp_client.sample_rate:.4f}  ε={args.epsilon}")
+    print(f"  True label: {int(target[0].item())}")
+    print()
+
+    # --- Attack unprotected gradient ---
+    print("  == Attack on unprotected (No-DP) gradient ==")
+    attack_nd = GradientInversionAttack(model, original_weights, unprotected_grad, device=device)
+    recon_no_dp, inferred_label, _ = attack_nd.attack(
         batch_size=1,
         steps=args.attack_steps,
         learning_rate=args.attack_lr,
-        label_hint=int(target[0].item()),
+        label_hint=None,
+        verbose=True,
     )
+    mse_nd = GradientInversionAttack.evaluate_reconstruction_mse(data, recon_no_dp)
+    ssim_nd = GradientInversionAttack.evaluate_ssim(data, recon_no_dp)
+    print(f"    => iDLG inferred label: {inferred_label}  |  "
+          f"MSE = {mse_nd:.6f}   SSIM = {ssim_nd:.4f}\n")
 
-    mse = GradientInversionAttack.evaluate_reconstruction_mse(data, recon)
-    psnr = GradientInversionAttack.evaluate_psnr(data, recon)
-    final_sim = history["sim"][-1]
+    # --- Attack DP-protected gradient ---
+    print("  == Attack on DP-protected gradient ==")
+    attack_dp = GradientInversionAttack(model, original_weights, dp_grad, device=device)
+    recon_dp, inferred_label_dp, _ = attack_dp.attack(
+        batch_size=1,
+        steps=args.attack_steps,
+        learning_rate=args.attack_lr,
+        label_hint=None,
+        verbose=True,
+    )
+    mse_dp = GradientInversionAttack.evaluate_reconstruction_mse(data, recon_dp)
+    ssim_dp = GradientInversionAttack.evaluate_ssim(data, recon_dp)
+    print(f"    => iDLG inferred label: {inferred_label_dp}  |  "
+          f"MSE = {mse_dp:.6f}   SSIM = {ssim_dp:.4f}\n")
 
-    print(f"  -> Reconstruction MSE: {mse:.6f}")
-    print(f"  -> Reconstruction PSNR: {psnr:.2f} dB")
-    print(f"  -> Final gradient cosine similarity: {final_sim:.4f}")
-    print(f"  -> True label: {target[0].item()}, Inferred: {label_recon.item() if hasattr(label_recon, 'item') else label_recon}")
+    # --- Summary ---
+    print("  " + "─" * 60)
+    print(f"  {"Attack Efficacy Summary":^60}")
+    print("  " + "─" * 60)
+    print(f"  {"":>24} {"MSE":>12} {"SSIM":>12}")
+    print(f"  {"No DP (unprotected)":>24} {mse_nd:>12.6f} {ssim_nd:>12.4f}")
+    print(f"  {"With DP (protected)":>24} {mse_dp:>12.6f} {ssim_dp:>12.4f}")
+    mse_ratio = mse_dp / (mse_nd + 1e-8)
+    print(f"  {"DP / No-DP ratio":>24} {mse_ratio:>17.1f}x")
+    print("  " + "─" * 60)
 
-    plot_attack_comparison(data, recon, save_path="output/attack_comparison.png")
-    print("  -> Attack comparison plot saved to output/attack_comparison.png")
+    plot_attack_comparison(data, recon_no_dp, recon_dp, save_path="output/attack_comparison.png")
+    print("\n  => 3-panel figure saved to output/attack_comparison.png")
 
-    return {"mse": mse, "psnr": psnr, "similarity": final_sim}
+    return {"mse_no_dp": mse_nd, "ssim_no_dp": ssim_nd, "mse_dp": mse_dp, "ssim_dp": ssim_dp}
 
 
 def run_start_server(args):
@@ -186,8 +226,9 @@ Examples:
     attack.add_argument("--clients", type=int, default=4)
     attack.add_argument("--samples", type=int, default=1500)
     attack.add_argument("--non-iid", type=float, default=0.8)
-    attack.add_argument("--attack-steps", type=int, default=300)
-    attack.add_argument("--attack-lr", type=float, default=0.1)
+    attack.add_argument("--epsilon", type=float, default=8.0, help="DP epsilon for protected gradient")
+    attack.add_argument("--attack-steps", type=int, default=1000, help="Adam optimization steps")
+    attack.add_argument("--attack-lr", type=float, default=0.1, help="Adam learning rate")
 
     deploy = sub.add_parser("deploy", help="Start secure prediction API")
     deploy.add_argument("--host", default="0.0.0.0")

@@ -141,6 +141,32 @@ class DPClient:
             state[name] = torch.from_numpy(weights[name]).to(self.device)
         self.model.load_state_dict(state)
 
+    def compute_dp_gradient(self, data: torch.Tensor, target: torch.Tensor) -> Dict[str, np.ndarray]:
+        """Forward-backward through DP pipeline and return the noised gradient.
+
+        This is used by the attack demo to capture a DP-protected gradient
+        for the same input that was leaked in the unprotected path.
+        The model parameters are NOT updated.
+        """
+        self.model.train()
+        data, target = data.to(self.device), target.to(self.device)
+
+        self.model.zero_grad()
+        output = self.model(data)
+        loss = F.cross_entropy(output, target)
+        loss.backward()
+
+        self._clip_gradients(self.model.parameters(), self.clip_norm)
+        self._add_noise(self.model.parameters())
+
+        dp_grad = {}
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                dp_grad[name] = param.grad.cpu().numpy().copy()
+
+        self.model.zero_grad()
+        return dp_grad
+
     @property
     def privacy_spent(self) -> float:
         if not self._composed_rdp:
