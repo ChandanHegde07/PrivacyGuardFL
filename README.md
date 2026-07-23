@@ -5,7 +5,7 @@ Privacy-Preserving Federated Learning with Attack Demonstration & Secure Deploym
 Federated Learning system that trains MNIST collaboratively across 4 simulated
 clients (hospitals) without sharing raw data, adds Differential Privacy
 (DP-SGD with Opacus-verified RDP accounting), demonstrates Gradient Inversion
-attacks, and deploys the DP-protected model behind a Fernet-encrypted Flask API.
+attacks, and deploys the DP-protected model behind an authenticated, Fernet-encrypted Flask API.
 
 ## Architecture
 
@@ -29,15 +29,15 @@ attacks, and deploys the DP-protected model behind a Fernet-encrypted Flask API.
   └──────────────┬───────────────────────────┬───────────────────┘
                  │                           │
     ┌────────────▼───────────┐   ┌───────────▼──────────────────┐
-    │  Gradient Inversion    │   │  Secure Flask API             │
+    │  Gradient Inversion    │   │  Authenticated Flask API      │
     │  Attack Demo           │   │                               │
-    │                        │   │  POST /predict   (image file) │
-    │  DLG: optimise dummy   │   │  POST /predict/raw (28×28)   │
-    │  inputs to match       │   │  POST /health                 │
-    │  leaked gradients      │   │                               │
-    │                        │   │  Fernet (AES-128-CBC)         │
-    │  Shows data leakage    │   │  encrypts predictions         │
-    │  without DP            │   │                               │
+    │                        │   │  POST /predict    (image)     │
+    │  iDLG: optimise dummy  │   │  POST /predict/raw (28×28)   │
+    │  inputs, infer label   │   │  GET  /health                 │
+    │  from sign(∇b_fc2)     │   │                               │
+    │                        │   │  HMAC-SHA256 API-key auth     │
+    │  Shows data leakage    │   │  IP rate limiting             │
+    │  without DP            │   │  Fernet payload encryption    │
     └────────────────────────┘   └──────────────────────────────┘
 ```
 
@@ -58,7 +58,7 @@ python main.py train
 # Gradient Inversion attack demo
 python main.py attack
 
-# Deploy DP model behind encrypted API
+# Deploy DP model behind authenticated API
 python main.py deploy --port 5000
 
 # Full pipeline
@@ -103,19 +103,28 @@ python main.py attack
 python main.py attack --attack-steps 500 --attack-lr 0.05
 ```
 
-### `deploy` — Secure prediction API
+### `deploy` — Authenticated prediction API
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--host` | 0.0.0.0 | Bind address |
 | `--port` | 5000 | Listen port |
 | `--model-path` | output/dp_model.pt | Trained model checkpoint |
+| `--api-id` | auto | API client ID |
+| `--api-key` | auto | API secret (HMAC signing key) |
 
 ```bash
 python main.py deploy --port 8080
+python main.py deploy --api-id hospital-a --api-key "$(openssl rand -hex 32)"
+
+# Client call with HMAC signature
 curl -X POST http://localhost:8080/predict/raw \
   -H "Content-Type: application/json" \
-  -d '{"pixels": [0.0, 0.0, ...]}'   # 784 float values
+  -H "X-Api-Id: <api-id>" \
+  -H "X-Timestamp: $(date +%s)" \
+  -H "X-Nonce: $(openssl rand -hex 16)" \
+  -H "X-Signature: $(echo -n '<api-id>:<nonce>:<timestamp>:<body>' | openssl dgst -sha256 -hmac '<api-key>')" \
+  -d '{"pixels": [0.0, 0.0, ...]}'
 ```
 
 ### `full` — Train, attack, print deploy instructions
@@ -148,8 +157,8 @@ src/
 ├── attacks/
 │   └── gradient_inversion.py     DLG attack: reconstruct inputs from leaked grads
 ├── deployment/
-│   └── api.py                    Flask app: /predict, /predict/raw, /health
-│                                 Fernet-encrypted responses
+│   └── api.py                    Flask app: authenticated endpoints,
+│                                 HMAC signing, rate limiting, Fernet
 └── ui/
     └── visualization.py          Matplotlib plots + Rich terminal summary
 ```
@@ -169,6 +178,13 @@ src/
   recognizable training images. With DP (σ > 0), reconstruction quality
   degrades proportionally.
 
-- **Deployment**: Predictions are encrypted with Fernet
-  (AES-128-CBC + HMAC-SHA256). The encryption key is printed at server
-  startup — save it to decrypt responses.
+- **Deployment**: The prediction API provides the following security properties:
+
+| Property | Mechanism | Notes |
+|----------|-----------|-------|
+| Authentication | HMAC-SHA256 per-request signing (X-Signature) | API ID + shared secret; replay protection via timestamp+nonce |
+| Payload confidentiality | Fernet (AES-128-CBC + HMAC-SHA256) | Response body is encrypted; must be decrypted client-side |
+| Rate limiting | Per-IP sliding window (120 req/60 s) | Prevents model extraction via brute force |
+| Input validation | Max image size (10 MB), max payload (64 KB), pixel count/shape checks | Blocks malformed requests |
+| Transport security | Not provided | This server runs plain HTTP. Use a reverse proxy (nginx/Caddy) with TLS for production. |
+| Replay protection | Timestamp ±300 s window + nonce | Requests outside the window are rejected |

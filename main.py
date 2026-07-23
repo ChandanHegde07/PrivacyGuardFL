@@ -14,7 +14,6 @@ from src.core.federated import Client, FedServer, MNISTModel
 from src.data.pipeline import DataPipe
 from src.differential_privacy.dp_client import DPClient, DPFedServer
 from src.attacks.gradient_inversion import GradientInversionAttack
-from src.deployment.api import run_server
 from src.ui.visualization import (
     plot_attack_comparison,
     plot_label_distribution,
@@ -187,12 +186,19 @@ def run_attack_demo(args):
 
 
 def run_start_server(args):
-    print(f"\n[Deploy] Starting secure prediction API on {args.host}:{args.port}...")
+    from src.deployment.api import run_server
     model_path = args.model_path or "output/dp_model.pt"
     if not os.path.exists(model_path):
         print(f"Error: Model file not found at {model_path}. Train first with: python main.py train")
         sys.exit(1)
-    run_server(model_path, host=args.host, port=args.port)
+    print(f"\n[Deploy] Starting authenticated prediction API on {args.host}:{args.port}...")
+    run_server(
+        model_path,
+        host=args.host,
+        port=args.port,
+        api_id=args.api_id if getattr(args, "api_id", None) else None,
+        api_key=args.api_key if getattr(args, "api_key", None) else None,
+    )
 
 
 def main():
@@ -230,10 +236,12 @@ Examples:
     attack.add_argument("--attack-steps", type=int, default=1000, help="Adam optimization steps")
     attack.add_argument("--attack-lr", type=float, default=0.1, help="Adam learning rate")
 
-    deploy = sub.add_parser("deploy", help="Start secure prediction API")
+    deploy = sub.add_parser("deploy", help="Start authenticated prediction API")
     deploy.add_argument("--host", default="0.0.0.0")
     deploy.add_argument("--port", type=int, default=5000)
     deploy.add_argument("--model-path", default="output/dp_model.pt")
+    deploy.add_argument("--api-id", default=None, help="API client ID (auto-generated if omitted)")
+    deploy.add_argument("--api-key", default=None, help="API secret key (auto-generated if omitted)")
 
     full = sub.add_parser("full", help="Train, attack, and start server")
     full.add_argument("--clients", type=int, default=4)
