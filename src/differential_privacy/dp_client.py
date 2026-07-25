@@ -98,11 +98,12 @@ class DPClient:
 
     def _add_noise(self, parameters):
         params = list(parameters)
+        effective_std = self.noise_multiplier * self.clip_norm / self.batch_size
         for p in params:
             if p.grad is not None:
                 noise = torch.normal(
                     mean=0.0,
-                    std=self.noise_multiplier * self.clip_norm,
+                    std=effective_std,
                     size=p.grad.shape,
                     device=self.device,
                 )

@@ -226,7 +226,7 @@ Examples:
     train.add_argument("--local-epochs", type=int, default=3)
     train.add_argument("--batch-size", type=int, default=32)
     train.add_argument("--epsilon", type=float, default=8.0)
-    train.add_argument("--lr-dp", type=float, default=0.05)
+    train.add_argument("--lr-dp", type=float, default=0.5)
     train.add_argument("--no-dp", action="store_true")
 
     attack = sub.add_parser("attack", help="Run Gradient Inversion attack demo")

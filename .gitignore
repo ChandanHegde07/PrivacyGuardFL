@@ -16,12 +16,8 @@ env/
 # Data (downloaded MNIST)
 data/
 
-# Generated artifacts
+# Model checkpoints
 models/
-*.pt
-*.pth
-*.png
-*.jpg
 
 # IDE
 .vscode/
@@ -36,7 +32,6 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
 
 # Environment
 .env
