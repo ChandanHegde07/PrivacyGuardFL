@@ -83,20 +83,22 @@ class DPClient:
         self._steps_taken += 1
 
     def _clip_gradients(self, parameters, clip_norm: float):
+        params = list(parameters)
         total_norm = 0.0
-        for p in parameters:
+        for p in params:
             if p.grad is not None:
                 param_norm = p.grad.data.norm(2).item()
                 total_norm += param_norm**2
         total_norm = total_norm**0.5
 
         clip_coef = min(clip_norm / (total_norm + 1e-6), 1.0)
-        for p in parameters:
+        for p in params:
             if p.grad is not None:
                 p.grad.data.mul_(clip_coef)
 
     def _add_noise(self, parameters):
-        for p in parameters:
+        params = list(parameters)
+        for p in params:
             if p.grad is not None:
                 noise = torch.normal(
                     mean=0.0,

@@ -85,6 +85,7 @@ def run_fl_training(args):
     print(f"  -> DP-FL: Final accuracy = {dp_acc:.1f}% (Privacy budget spent: ε={dp_eps:.2f})")
 
     torch.save(dp_server.global_model.state_dict(), "output/dp_model.pt")
+    torch.save(dp_server.global_model.state_dict(), "models/final_model.pt")
 
     plot_training_history(fl_history, dp_history, save_path="output/training_history.png")
     summary = render_summary(fl_history, dp_history)

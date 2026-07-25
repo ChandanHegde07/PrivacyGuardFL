@@ -13,17 +13,15 @@ eggs/
 venv/
 env/
 
-# Data
+# Data (downloaded MNIST)
 data/
-*.gz
-*.tar
 
-# Output artifacts
-output/
-*.png
+# Generated artifacts
+models/
 *.pt
 *.pth
-models/
+*.png
+*.jpg
 
 # IDE
 .vscode/
@@ -46,3 +44,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Test / coverage
+htmlcov/
+.coverage
+.pytest_cache/
