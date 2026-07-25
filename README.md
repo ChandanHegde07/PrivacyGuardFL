@@ -1,303 +1,159 @@
 # PrivacyGuard FL
 
-Privacy-Preserving Federated Learning with Attack Demonstration & Authenticated API Deployment.
-
-Federated Learning system that trains MNIST collaboratively across 4 simulated clients (hospitals)
-without sharing raw data, adds Differential Privacy (DP-SGD with Opacus RDP accounting),
-demonstrates Gradient Inversion (iDLG) attacks, and deploys the DP-protected model behind
-an authenticated, rate-limited, Fernet-encrypted Flask API.
-
-## Architecture
+Privacy-preserving federated learning on MNIST with DP-SGD, gradient-inversion attack demo, and authenticated API deployment.
 
 ```
-                    Non-IID data split ──► Client 0 (digits 0–1)
-                   ╱                      Client 1 (digits 1–2)
-  MNIST ── DataPipe ─┼── 500–1500 each ──── Client 2 (digits 2–3)
-                   ╲                      Client 3 (digits 3–4)
-                    local epochs × N rounds
-
-                       │  model weights  │
-                       ▼                 ▼
-  ┌───────────────────────────────────────────────────────────────┐
-  │                     FedAvg Aggregation                        │
-  │                                                               │
-  │  Standard FL:     Σ(weights) / N     (no protection)          │
-  │                                                               │
-  │  DP-FL:           Σ(weights) / N     on DP-SGD updates        │
-  │                           ↑ per-sample clip C=1.0              │
-  │                           ↑ Gaussian noise σ·C per step        │
-  │                           ↑ ε via Opacus RDP accountant        │
-  └──────────────┬────────────────────────────┬───────────────────┘
-                 │                            │
-    ┌────────────▼───────────┐   ┌────────────▼──────────────────┐
-    │  Gradient Inversion    │   │  Authenticated Flask API      │
-    │  Attack Demo           │   │                                │
-    │                        │   │  POST /predict    (image)      │
-    │  iDLG: infer label     │   │  POST /predict/raw (28×28)     │
-    │  from sign(∇b_fc2)     │   │  GET  /health                  │
-    │                        │   │                                │
-    │  Adam gradient         │   │  HMAC-SHA256 per-request auth  │
-    │  matching + TV reg     │   │  IP rate limiting              │
-    │                        │   │  Fernet encrypted responses    │
-    │  Cosine similarity     │   │  Timestamp+nonce replay guard  │
-    │  loss on all layers    │   │                                │
-    └────────────────────────┘   └───────────────────────────────┘
+MNIST ──► Non-IID split ──► 4 clients ──► FedAvg ──┬─► Standard FL
+                                                    └─► DP-FL (clip C + noise σ·C/bs + Opacus ε)
+                                                         │
+                      Gradient Inversion Attack ◄────────┘
+                                                         │
+                      Authenticated Flask API ◄──────────┘
+                        (HMAC auth + Fernet + rate limit)
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Install
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pip install -e .
-
-# 2. Run everything (train → attack → summary)
-python main.py full
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && pip install -e .
+python main.py full                  # train → attack → summary
 ```
-
-## Setup
-
-| Method | Command |
-|--------|---------|
-| pip (editable) | `pip install -e .` |
-| pip (deps)     | `pip install -r requirements.txt` |
-| Docker         | `docker compose build && docker compose run train` |
 
 ## Commands
 
-### `python main.py train`
+| Command | What it does |
+|---------|--------------|
+| `python main.py train` | Trains Standard FL + DP-FL (ε=8). Saves models + plots. |
+| `python main.py attack` | iDLG reconstruction from unprotected vs DP-protected gradients. |
+| `python main.py deploy` | Starts authenticated prediction API on `:5000`. |
+| `python main.py full` | train → attack → print deploy instructions. |
 
-Trains both Standard FL and DP-FL, saves models and plots.
+### `train` options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--clients` | 4 | Number of simulated clients |
+| `--clients` | 4 | Simulated hospitals |
 | `--samples` | 1500 | Training samples per client |
-| `--non-iid` | 0.8 | Label-skew degree (0 = uniform, 1 = extreme) |
-| `--rounds` | 20 | Federated aggregation rounds |
-| `--local-epochs` | 3 | SGD epochs per client per round |
-| `--batch-size` | 32 | Local batch size |
-| `--epsilon` | 8.0 | DP privacy budget ε (δ fixed at 1e-5) |
-| `--lr-dp` | 0.05 | Learning rate for DP clients |
-| `--no-dp` | — | Skip DP training, run standard FL only |
+| `--non-iid` | 0.8 | Label skew (0=uniform, 1=extreme) |
+| `--rounds` | 20 | FL aggregation rounds |
+| `--local-epochs` | 3 | SGD epochs per round per client |
+| `--batch-size` | 16 | Local batch size |
+| `--epsilon` | 8.0 | DP privacy budget (δ=1e-5) |
+| `--lr-dp` | 0.3 | DP learning rate (no momentum) |
+| `--no-dp` | — | Skip DP-FL, only standard FL |
 
-```bash
-python main.py train                              # default 20 rounds, ε=8
-python main.py train --no-dp                      # standard FL only
-python main.py train --epsilon 4.0 --rounds 30    # tight privacy
-python main.py train --samples 3000 --clients 6   # more data
-```
-
-### `python main.py attack`
-
-Runs iDLG gradient inversion on unprotected and DP-protected gradients from a single input,
-reports MSE and SSIM for both, and saves a 3-panel comparison figure.
+### `attack` options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--clients` | 4 | Clients for data splitting |
-| `--samples` | 1500 | Samples per client |
-| `--non-iid` | 0.8 | Label-skew degree |
-| `--epsilon` | 8.0 | DP epsilon for the protected gradient |
-| `--attack-steps` | 1000 | Adam optimization steps |
+| `--attack-steps` | 1000 | Adam iterations |
 | `--attack-lr` | 0.1 | Adam learning rate |
 
-### `python main.py deploy`
-
-Starts the authenticated prediction API.
+### `deploy` options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--host` | 0.0.0.0 | Bind address |
 | `--port` | 5000 | Listen port |
-| `--model-path` | output/dp_model.pt | Trained model |
+| `--model-path` | output/dp_model.pt | Model checkpoint |
 | `--api-id` | auto | Client ID |
-| `--api-key` | auto | HMAC signing secret |
+| `--api-key` | auto | HMAC secret |
+
+### Deploy with auth
 
 ```bash
 python main.py deploy --port 5000
 
-# Client call
-API_ID="<printed-at-startup>"
-API_KEY="<printed-at-startup>"
+API_ID="<from-stdout>" API_KEY="<from-stdout>"
 BODY='{"pixels": [0.0, ... 784 values ...]}'
-TIMESTAMP=$(date +%s)
-NONCE=$(openssl rand -hex 16)
-SIG=$(echo -n "${API_ID}:${NONCE}:${TIMESTAMP}:${BODY}" | openssl dgst -sha256 -hmac "$API_KEY" | cut -d' ' -f2)
+TS=$(date +%s) NONCE=$(openssl rand -hex 16)
+SIG=$(echo -n "${API_ID}:${NONCE}:${TS}:${BODY}" | openssl dgst -sha256 -hmac "$API_KEY" | cut -d' ' -f2)
 curl -X POST http://localhost:5000/predict/raw \
   -H "Content-Type: application/json" \
-  -H "X-Api-Id: ${API_ID}" \
-  -H "X-Timestamp: ${TIMESTAMP}" \
-  -H "X-Nonce: ${NONCE}" \
-  -H "X-Signature: ${SIG}" \
+  -H "X-Api-Id: ${API_ID}" -H "X-Timestamp: ${TS}" \
+  -H "X-Nonce: ${NONCE}" -H "X-Signature: ${SIG}" \
   -d "$BODY"
 ```
-
-### `python main.py full`
-
-Runs train, then attack, then prints deploy instructions.
 
 ### Docker
 
 ```bash
-# Build
 docker compose build
-
-# Train
 docker compose run train
-
-# Attack
 docker compose run attack
-
-# API server
 docker compose up api
 ```
 
-## Output
+## Results (seed 42, 20 rounds, 1500 samples/client)
 
-### Plots (generated by `train`, `attack`, or `full`)
-
-| File | Description |
-|------|-------------|
-| `output/label_distribution.png` | Non-IID label skew across 4 clients |
-| `output/training_curves.png` | Accuracy and loss over rounds (FL vs DP-FL) |
-| `output/privacy_budget.png` | ε spent per round vs target budget |
-| `output/attack_comparison.png` | 3-panel: original \| no-DP recon \| DP recon with MSE/SSIM |
-
-### Model checkpoints
-
-| File | Description |
-|------|-------------|
-| `output/fl_model.pt` | Standard FL trained model |
-| `output/dp_model.pt` | DP-FL trained model |
-| `models/final_model.pt` | Same as dp_model.pt (canonical location) |
-
-## Modules
-
-Industry-standard `src/` layout (src-layout convention):
-
-```
-PrivacyGuard FL/
-├── .github/workflows/ci.yml     CI (GitHub Actions)
-├── .gitignore
-├── Dockerfile                    Multi-stage Docker build
-├── LICENSE                       MIT
-├── README.md
-├── docker-compose.yml            Train / attack / api services
-├── main.py                       CLI entry point (train, attack, deploy, full)
-├── pyproject.toml                Build config + tool settings
-├── requirements.txt              Pinned dependencies
-├── setup.py                      Editable install
-│
-├── src/
-│   ├── __init__.py
-│   ├── data/pipeline.py          Non-IID MNIST → per-client DataLoaders
-│   ├── core/federated.py         MNISTModel, Client, FedServer, FedAvg
-│   ├── differential_privacy/
-│   │   └── dp_client.py          DPClient, DPFedServer, Opacus RDP ε tracking
-│   ├── attacks/
-│   │   └── gradient_inversion.py iDLG (Adam + TV regularizer)
-│   ├── deployment/
-│   │   └── api.py                Flask: HMAC auth, Fernet, rate limiting
-│   └── ui/
-│       └── visualization.py      Matplotlib plots + Rich tables
-│
-├── notebooks/
-│   └── 01_end_to_end_demo.ipynb  Walkthrough with markdown cells
-│
-└── tests/
-    ├── test_data.py              Non-IID split, shapes, skew
-    ├── test_federated.py         FedAvg, Client, Server
-    ├── test_dp.py                Clipping, noise, ε increase
-    ├── test_attack.py            SSIM, label inference, attack shapes
-    └── test_api.py               HMAC auth, Fernet, rate limiting
-
-## Privacy Guarantees
-
-### DP-SGD Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| Clip norm `C` | 1.0 | Per-sample gradient L2 bound |
-| Target ε | 8.0 | Privacy budget (configurable via `--epsilon`) |
-| δ | 1e-5 | Failure probability |
-| DP learning rate | 0.3 | Higher LR overcomes noise (no momentum in DP path) |
-| Local epochs | 3 | More steps let noise average out |
-| Batch size | 16 | Smaller batches increase per-step noise |
-
-The noise multiplier σ is computed via Opacus `get_noise_multiplier()`
-and verified against Opacus `RDPAccountant` at every training round.
-
-### Benchmark Results (20 rounds, 1500 samples/client, seed 42)
-
-| Metric | Standard FL | DP-FL (ε=8) |
-|--------|-------------|-------------|
+| Metric | No-DP | DP (ε=8) |
+|--------|-------|----------|
 | Test accuracy | 97.2% | 84.0% |
-| Privacy budget | — | ε = 8.01 |
 | Attack MSE | 0.72 | 1.30 |
 | Attack SSIM | 0.12 | 0.14 |
 
-The ~13 percentage-point gap between No-DP and DP-FL shows the
-privacy–utility trade-off. DP-SGD noise degrades reconstruction
-quality in the gradient-inversion attack (MSE 0.72 → 1.30).
+## DP-SGD Parameters
 
-**Noise-scale bugfix** (`src/differential_privacy/dp_client.py:105`):
-noise std was `σ·C` instead of `σ·C / batch_size`. PyTorch
-`.backward()` returns **averaged** gradients (not summed), so the
-noise correction factor is `1/batch_size`. Before the fix, effective
-noise was `batch_size`× too large, wiping out all learning.
+| Param | Value | Why |
+|-------|-------|-----|
+| Clip norm C | 1.0 | Per-sample gradient bound |
+| ε | 8.0 | Privacy budget (configurable) |
+| δ | 1e-5 | Failure probability |
+| σ | computed via Opacus | Noise multiplier from ε, δ, q, epochs |
+| Noise on averaged grad | `σ·C / batch_size` | PyTorch `.backward()` returns mean, not sum |
+| Learning rate | 0.3 | Higher LR compensates for noise (DP has no momentum) |
+| Local epochs | 3 | More steps per round averages noise |
 
-### API Security Properties
+**Noise bugfix** (`dp_client.py:105`): noise std was `σ·C` — `batch_size`× too large for averaged gradients. Divided by `batch_size` to match DP-SGD accounting.
 
-### API Security Properties
+## API Security
 
-| Property | Mechanism | Notes |
-|----------|-----------|-------|
-| Authentication | HMAC-SHA256 per-request signing | API ID + shared secret |
-| Payload confidentiality | Fernet (AES-128-CBC + HMAC-SHA256) | Response body must be decrypted client-side |
-| Rate limiting | Per-IP sliding window (120 req / 60 s) | Prevents model extraction |
-| Input validation | Max image size 10 MB, max payload 64 KB, pixel count check | Blocks malformed requests |
-| Transport security | Not provided | Use a reverse proxy with TLS for production |
-| Replay protection | Timestamp ±300 s window + per-request nonce | Stale requests are rejected |
+| Property | Mechanism |
+|----------|-----------|
+| Auth | HMAC-SHA256 per-request (X-Signature) |
+| Confidentiality | Fernet (AES-128-CBC + HMAC-SHA256) |
+| Replay protection | Timestamp ±300s + per-request nonce |
+| Rate limiting | 120 req / 60s per IP |
+| Transport | Not provided — use a reverse proxy for TLS |
+
+## Output
+
+| File | Content |
+|------|---------|
+| `output/training_curves.png` | Accuracy/loss over rounds |
+| `output/privacy_budget.png` | ε spent per round |
+| `output/attack_comparison.png` | Original / no-DP recon / DP recon |
+| `output/label_distribution.png` | Non-IID skew per client |
+| `output/dp_model.pt` | Trained model checkpoint |
+| `models/final_model.pt` | Canonical model location |
+
+## Project Layout
+
+```
+PrivacyGuard FL/
+├── main.py, pyproject.toml, setup.py, requirements.txt
+├── Dockerfile, docker-compose.yml
+├── .github/workflows/ci.yml
+├── src/
+│   ├── data/pipeline.py
+│   ├── core/federated.py
+│   ├── differential_privacy/dp_client.py
+│   ├── attacks/gradient_inversion.py
+│   ├── deployment/api.py
+│   └── ui/visualization.py
+├── tests/ (5 test files, 25 tests)
+└── notebooks/01_end_to_end_demo.ipynb
+```
 
 ## Limitations
 
-- **Simulated clients only**: All clients run locally; no real network communication.
-  The "Federated Learning" is simulated via sequential local training + FedAvg aggregation.
-- **No TLS**: The Flask API runs on plain HTTP. Wrap with nginx/Caddy for TLS.
-- **Single task**: Currently MNIST digit classification only.
-  The pipeline generalizes to any image model with minimal changes.
-- **Small-scale DP**: With 1500 samples per client, DP-SGD noise is high relative to signal.
-  Increasing `--samples` and `--local-epochs` improves DP accuracy.
-- **Notebook dependencies**: The notebook requires a running Jupyter kernel with the .venv.
-  Launch with `jupyter notebook` from the project root after activating the venv.
+- Simulated clients only (single process, sequential local training)
+- No TLS — wrap with nginx/Caddy for production
+- MNIST only — CNN generalizes but data pipeline would need adaptation
+- Notebook requires jupyter kernel with `.venv` activated
 
 ## Tests
 
 ```bash
-pip install pytest
 pytest tests/ -v -m "not slow"
-```
-
-## Repository
-
-```
-.gitignore
-LICENSE
-README.md
-pyproject.toml
-setup.py
-requirements.txt
-Dockerfile
-docker-compose.yml
-.github/workflows/ci.yml
-main.py
-data/          (downloaded MNIST — gitignored)
-models/        (model checkpoints — gitignored)
-output/        (generated plots — gitignored)
-notebooks/
-src/
-tests/
 ```
