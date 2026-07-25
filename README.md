@@ -176,30 +176,43 @@ docker compose up api
 
 ## Modules
 
-```
-src/
-├── __init__.py
-├── data/pipeline.py                  Non-IID MNIST → per-client DataLoaders
-├── core/federated.py                 MNISTModel, Client, FedServer, FedAvg
-├── differential_privacy/
-│   └── dp_client.py                  DPClient, DPFedServer, Opacus RDP ε tracking
-├── attacks/
-│   └── gradient_inversion.py         iDLG gradient inversion (Adam + TV reg)
-├── deployment/
-│   └── api.py                        Flask API: HMAC auth, Fernet, rate limiting
-└── ui/
-    └── visualization.py              Matplotlib plots + Rich terminal tables
+Industry-standard `src/` layout (src-layout convention):
 
-notebooks/
-└── 01_end_to_end_demo.ipynb          Walkthrough with markdown explanations
-
-tests/
-├── test_data.py                      Non-IID split, shapes, label skew
-├── test_federated.py                 FedAvg, Client, Server
-├── test_dp.py                        Clipping, noise, ε increase
-├── test_attack.py                    SSIM, label inference, attack shapes
-└── test_api.py                       HMAC auth, Fernet, rate limiting, replay
 ```
+PrivacyGuard FL/
+├── .github/workflows/ci.yml     CI (GitHub Actions)
+├── .gitignore
+├── Dockerfile                    Multi-stage Docker build
+├── LICENSE                       MIT
+├── README.md
+├── docker-compose.yml            Train / attack / api services
+├── main.py                       CLI entry point (train, attack, deploy, full)
+├── pyproject.toml                Build config + tool settings
+├── requirements.txt              Pinned dependencies
+├── setup.py                      Editable install
+│
+├── src/
+│   ├── __init__.py
+│   ├── data/pipeline.py          Non-IID MNIST → per-client DataLoaders
+│   ├── core/federated.py         MNISTModel, Client, FedServer, FedAvg
+│   ├── differential_privacy/
+│   │   └── dp_client.py          DPClient, DPFedServer, Opacus RDP ε tracking
+│   ├── attacks/
+│   │   └── gradient_inversion.py iDLG (Adam + TV regularizer)
+│   ├── deployment/
+│   │   └── api.py                Flask: HMAC auth, Fernet, rate limiting
+│   └── ui/
+│       └── visualization.py      Matplotlib plots + Rich tables
+│
+├── notebooks/
+│   └── 01_end_to_end_demo.ipynb  Walkthrough with markdown cells
+│
+└── tests/
+    ├── test_data.py              Non-IID split, shapes, skew
+    ├── test_federated.py         FedAvg, Client, Server
+    ├── test_dp.py                Clipping, noise, ε increase
+    ├── test_attack.py            SSIM, label inference, attack shapes
+    └── test_api.py               HMAC auth, Fernet, rate limiting
 
 ## Privacy Guarantees
 
@@ -210,27 +223,33 @@ tests/
 | Clip norm `C` | 1.0 | Per-sample gradient L2 bound |
 | Target ε | 8.0 | Privacy budget (configurable via `--epsilon`) |
 | δ | 1e-5 | Failure probability |
-| DP learning rate | 0.5 | Higher LR overcomes noise |
+| DP learning rate | 0.3 | Higher LR overcomes noise (no momentum in DP path) |
 | Local epochs | 3 | More steps let noise average out |
-| Noise scaling | `σ · C / batch_size` | Noise corrects for gradient averaging |
+| Batch size | 16 | Smaller batches increase per-step noise |
 
 The noise multiplier σ is computed via Opacus `get_noise_multiplier()`
 and verified against Opacus `RDPAccountant` at every training round.
 
-### Benchmark Results (10 rounds, 1500 samples/client)
+### Benchmark Results (20 rounds, 1500 samples/client, seed 42)
 
 | Metric | Standard FL | DP-FL (ε=8) |
 |--------|-------------|-------------|
-| Test accuracy | 95.9% | 96.0% |
-| Final ε | — | 8.09 |
+| Test accuracy | 97.2% | 84.0% |
+| Privacy budget | — | ε = 8.01 |
 | Attack MSE | 0.72 | 1.30 |
 | Attack SSIM | 0.12 | 0.14 |
 
-The noise scaling bugfix (`src/differential_privacy/dp_client.py:103`):
-noise std was `σ·C` instead of `σ·C / batch_size`, making effective
-noise `batch_size`× too large. With the fix, DP-FL achieves the
-same accuracy as standard FL at ε=8 while still degrading attack
-reconstruction quality (MSE 0.72 → 1.30).
+The ~13 percentage-point gap between No-DP and DP-FL shows the
+privacy–utility trade-off. DP-SGD noise degrades reconstruction
+quality in the gradient-inversion attack (MSE 0.72 → 1.30).
+
+**Noise-scale bugfix** (`src/differential_privacy/dp_client.py:105`):
+noise std was `σ·C` instead of `σ·C / batch_size`. PyTorch
+`.backward()` returns **averaged** gradients (not summed), so the
+noise correction factor is `1/batch_size`. Before the fix, effective
+noise was `batch_size`× too large, wiping out all learning.
+
+### API Security Properties
 
 ### API Security Properties
 

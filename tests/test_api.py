@@ -2,15 +2,24 @@
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import threading
 import time
 
 import pytest
 import requests
+import torch
 from wsgiref.simple_server import make_server
 
 from src.deployment.api import create_app
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _test_model():
+    from src.core.federated import MNISTModel
+    os.makedirs("output", exist_ok=True)
+    torch.save(MNISTModel().state_dict(), "output/test_model.pt")
 
 
 @pytest.fixture
