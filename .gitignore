@@ -14,7 +14,7 @@ venv/
 env/
 
 # Data (downloaded MNIST)
-data/
+/data/
 
 # Model checkpoints
 models/
